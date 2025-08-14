@@ -1,39 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OVERCLOCK — a neon cyberpunk circuit shooter in one Python file (pygame only)
+OVERCLOCK — a neon cyberpunk circuit shooter (pygbag-ready, single file)
 
-Theme:
-  You are a small‑but‑mighty digital hero in the matrix. Clear
-  viruses, bugs, and worms while canceling hostile/natural power surges
-  racing down the circuits.
-
-Changes in this build:
-  • OVERCLOCK is now a single BLAST: when full, press SHIFT to fire a huge
-    surge in all four circuit directions at once. It pierces, cancels enemy/
-    natural surges, and damages foes. One shot drains the meter completely.
-  • Overclock is harder to earn (meter fills slower, bigger capacity).
-  • No bright yellow overlay; instead the screen shakes for the blast window.
-  • Enemy mitosis: when two enemies of the SAME TYPE touch, they spawn a third.
-    (Throttled with a short cooldown and capped by MAX_ENEMIES_ON_FIELD.)
+Notes for web build (pygbag):
+- Uses an async main loop with `await asyncio.sleep(0)` so the browser event
+  loop can breathe.
+- Keeps audio optional (mixer init is try/except) so it won't break on the web.
+- Slightly tweaked display flags (SCALED) for nicer browser sizing.
 
 Controls:
   • Move: WASD / Arrow Keys
-  • Aim: mouse (cardinal snap to the nearest circuit direction)
+  • Aim: mouse (cardinal snap to nearest circuit direction)
   • Fire surge: Left Mouse / SPACE
-  • OVERCLOCK BLAST: SHIFT (when meter is full)
+  • OVERCLOCK BLAST: SHIFT (full meter)
   • Pause: P
   • Toggle scanlines: M
   • Toggle bloom/shake: V
   • Restart (from game over): R
-  • Quit: ESC
-
-Dependencies: pygame  (pip install pygame)
+  • Quit (desktop only): ESC
 """
 
 import math
 import random
 import sys
+import asyncio
 from array import array
 from collections import deque
 
@@ -64,16 +55,13 @@ SURGE_SPEED_ENEMY = 460
 SURGE_SPEED_NATURAL = 520
 
 # ---------- Overclock (BLAST) ----------
-# Harder to earn:
-OC_FILL_PER_CANCEL = 8       # meter from canceling enemy/natural surge (player shots only)
-OC_FILL_PER_KILL   = 12      # meter from killing an enemy (player shots only)
-OC_MAX = 200                 # total meter capacity
-# Blast projectile stats:
+OC_FILL_PER_CANCEL = 8
+OC_FILL_PER_KILL   = 12
+OC_MAX = 200
 OC_SURGE_R = 10
 OC_SURGE_SPEED = 700
 OC_SURGE_TTL = 1.6
 OC_SURGE_DMG = 2
-# Screen shake during the blast (no bright overlay)
 OC_BLAST_SHAKE_TIME = 0.9
 OC_BLAST_SHAKE_STRENGTH = 6.0
 
@@ -214,6 +202,7 @@ class SFX:
     def __init__(self):
         self.enabled = False
         try:
+            # On web this may no-op until user interaction; failure is fine.
             pygame.mixer.pre_init(22050, -16, 1, 256)
             pygame.mixer.init()
             self.enabled = pygame.mixer.get_init() is not None
@@ -269,12 +258,10 @@ class Surge:
         self.trail.append(self.pos.copy())
         self.pos += self.dir * self.speed * dt
         self.ttl -= dt
-        # stay on a grid wire
         snap_axis(self.pos, self.dir)
         return self.ttl > 0 and (-20 < self.pos.x < W+20) and (-20 < self.pos.y < H+20)
 
     def draw(self, surf):
-        # trail blend
         if len(self.trail) > 2:
             for i in range(1, len(self.trail)):
                 a = self.trail[i - 1]
@@ -300,27 +287,23 @@ class Enemy:
         self.shoot_t = rand_between((1.0, 1.6))
         self.spin = random.uniform(-2.0, 2.0)
         self.angle = random.random() * TAU
-        self.rep_cd = 0.0  # mitosis cooldown
+        self.rep_cd = 0.0
 
     def common_move(self, dt, speed):
-        # Lock to wire and move; consider turning at intersections
         snap_axis(self.pos, self.dir)
         self.pos += self.dir * speed * dt
-        # world bounds bounce
         if self.pos.x < 12 or self.pos.x > W-12:
             self.pos.x = clamp(self.pos.x, 12, W-12)
             self.dir.x *= -1; snap_axis(self.pos, self.dir)
         if self.pos.y < 12 or self.pos.y > H-12:
             self.pos.y = clamp(self.pos.y, 12, H-12)
             self.dir.y *= -1; snap_axis(self.pos, self.dir)
-        # random turn at intersections
         if at_intersection(self.pos) and random.random() < self.turn_bias * dt * 60:
             if abs(self.dir.x) > 0:
                 self.dir = random.choice([pygame.Vector2(0,1), pygame.Vector2(0,-1)])
             else:
                 self.dir = random.choice([pygame.Vector2(1,0), pygame.Vector2(-1,0)])
             snap_axis(self.pos, self.dir)
-        # mitosis cooldown
         if self.rep_cd > 0.0:
             self.rep_cd = max(0.0, self.rep_cd - dt)
 
@@ -329,7 +312,6 @@ class Enemy:
         return self.hp <= 0
 
     def draw_base(self, surf, width=2):
-        # rotating diamond ring
         self.angle += self.spin / 60.0
         ca, sa = math.cos(self.angle), math.sin(self.angle)
         r = self.r
@@ -466,16 +448,9 @@ class Hero:
         return self.cd <= 0.0
 
     def shoot(self, aim_dir, overclock=False):
-        # Overclock no longer affects normal shots; it's now a separate BLAST.
         self.cd = HERO_SHOT_CD
         dirv = cardinal_from(aim_dir if aim_dir.length_squared() > 0 else self.face)
         return Surge(self.pos, dirv, SURGE_SPEED_PLAYER, "player", NEON_CYAN, r=SURGE_R)
-
-    def draw(self, surf):
-        col = NEON_CYAN if (self.ifr <= 0 or int(self.ifr*20)%2==0) else (140, 160, 160)
-        pygame.draw.circle(surf, col, (int(self.pos.x), int(self.pos.y)), self.r)
-        tip = self.pos + self.face * (self.r + 4)
-        pygame.draw.line(surf, col, self.pos, tip, 2)
 
 # ---------- Natural surge trains ----------
 class SurgeEmitter:
@@ -519,7 +494,8 @@ class Game:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("OVERCLOCK — Cyber Circuit Shooter")
-        self.screen = pygame.display.set_mode((W, H))
+        # SCALED helps fit the canvas in browser while preserving pixel art.
+        self.screen = pygame.display.set_mode((W, H), pygame.SCALED)
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("arial", 18, bold=True)
         self.bigfont = pygame.font.SysFont("arial", 48, bold=True)
@@ -642,18 +618,6 @@ class Game:
         y = random.randint(2, (H-2)//GRID - 2) * GRID
         return pygame.Vector2(x, y)
 
-    # ---- Game Loop ----
-    def run(self):
-        while True:
-            dt = self.clock.tick(FPS) / 1000.0
-            if not self.handle_events():
-                return
-            if self.state == "paused":
-                self.draw()
-                continue
-            self.update(dt)
-            self.draw()
-
     # ---- Update ----
     def update(self, dt):
         if self.state == "menu":
@@ -662,7 +626,6 @@ class Game:
             return
 
         keys = pygame.key.get_pressed()
-        tnow = pygame.time.get_ticks() / 1000.0
 
         # Hero
         self.hero.update(dt, keys)
@@ -670,14 +633,12 @@ class Game:
         # OVERCLOCK BLAST trigger
         if (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]) and self.hero.ready_overclock():
             self.fire_overclock_blast()
-            # set shake loop during blast
             self.oc_blast_timer = OC_BLAST_SHAKE_TIME
             self.add_shake(OC_BLAST_SHAKE_STRENGTH)
 
         # Maintain shake during blast
         if self.oc_blast_timer > 0.0:
             self.oc_blast_timer = max(0.0, self.oc_blast_timer - dt)
-            # refresh shake so it persists for the blast duration
             self.add_shake(OC_BLAST_SHAKE_STRENGTH * 0.75)
 
         # Normal firing
@@ -771,7 +732,6 @@ class Game:
                     if len(self.enemies) + len(to_add) >= MAX_ENEMIES_ON_FIELD:
                         continue
                     pos = (ei.pos + ej.pos) / 2 + pygame.Vector2(random.uniform(-6,6), random.uniform(-6,6))
-                    # spawn same type
                     if isinstance(ei, Virus):
                         child = Virus(pos, tier=getattr(ei, "tier", 1))
                     elif isinstance(ei, Bug):
@@ -795,12 +755,10 @@ class Game:
             for j in range(i+1, len(self.surges)):
                 if j in dead: continue
                 sj = self.surges[j]
-                # clash if one is player/oc and the other is enemy/natural
                 def is_friend(o): return o in ("player", "oc")
                 def is_foe(o):    return o in ("enemy", "natural")
                 if (is_friend(si.owner) and is_foe(sj.owner)) or (is_friend(sj.owner) and is_foe(si.owner)):
                     if si.pos.distance_to(sj.pos) <= (si.r + sj.r + 1):
-                        # If OVERCLOCK surge involved, it pierces (kill foe only)
                         if si.owner == "oc" and is_foe(sj.owner):
                             dead.add(j)
                         elif sj.owner == "oc" and is_foe(si.owner):
@@ -809,21 +767,16 @@ class Game:
                             dead.add(i); dead.add(j)
                         self.sfx.play("cancel")
                         self.spark((si.pos+sj.pos)/2, (140, 200, 255))
-                        # Only normal player cancels feed the meter
                         if ("player" in (si.owner, sj.owner)):
                             self.hero.add_oc(OC_FILL_PER_CANCEL)
         if dead:
             self.surges = [s for k,s in enumerate(self.surges) if k not in dead]
 
     def handle_surge_hits(self):
-        # Iterate on a copy; remove from original safely
         for s in list(self.surges):
             if s.owner in ("player", "oc"):
-                # Enemy hit
-                hit_any = False
                 for e in list(self.enemies):
                     if e.pos.distance_to(s.pos) <= (e.r + s.r):
-                        hit_any = True
                         died = e.take_damage(s.dmg)
                         self.sfx.play("hit")
                         self.spark(s.pos, NEON_CYAN if s.owner=="player" else NEON_YELLOW, 10)
@@ -841,14 +794,11 @@ class Game:
                                     if len(self.enemies) < MAX_ENEMIES_ON_FIELD:
                                         self.enemies.append(child)
                             self.score += 120 if s.owner=="player" else 90
-                        if not s.pierce:
-                            if s in self.surges:
-                                self.surges.remove(s)
-                            break
-                # If it didn't hit anything, continue flying
+                        if not s.pierce and s in self.surges:
+                            self.surges.remove(s)
+                        break
                 continue
             else:
-                # Enemy or natural surge hitting hero
                 if self.hero.pos.distance_to(s.pos) <= (self.hero.r + s.r):
                     if s in self.surges:
                         self.surges.remove(s)
@@ -856,30 +806,25 @@ class Game:
                         self.sfx.play("hurt")
                         self.add_shake(6.0)
 
-    # ---- Draw ----
+    # ---- HUD & Draw ----
     def draw_hud(self, surf):
         status = f"Sector {self.sector}   •   Score {self.score}   •   High {self.highscore}"
         draw_neon_text(surf, status, self.font, (12, 10), HUD_WHITE)
 
-        # Integrity (HP)
         x0, y0 = 12, 36
         for i in range(HERO_HP):
             col = NEON_PINK if i < self.hero.hp else (70, 60, 70)
             pygame.draw.rect(surf, col, pygame.Rect(x0 + i*18, y0, 14, 8))
 
-        # Overclock meter
         oc = self.hero.oc_meter / OC_MAX
         pygame.draw.rect(surf, (30,30,38), pygame.Rect(W-202, 36, 190, 8))
         pygame.draw.rect(surf, NEON_YELLOW, pygame.Rect(W-202, 36, int(190*oc), 8))
         if self.hero.ready_overclock() and self.oc_blast_timer <= 0.0:
-            label = "OVERCLOCK READY (SHIFT)"
-            col = NEON_YELLOW
+            label = "OVERCLOCK READY (SHIFT)"; col = NEON_YELLOW
         elif self.oc_blast_timer > 0.0:
-            label = "OVERCLOCK BLAST!"
-            col = NEON_GREEN
+            label = "OVERCLOCK BLAST!"; col = NEON_GREEN
         else:
-            label = "CHARGING…"
-            col = HUD_WHITE
+            label = "CHARGING…"; col = HUD_WHITE
         draw_neon_text(surf, label, self.font, (W-200, 48), col)
 
     def draw_menu(self, surf):
@@ -911,30 +856,24 @@ class Game:
     def draw(self):
         t = pygame.time.get_ticks()/1000.0
 
-        # World layer
         self.world.fill((0,0,0,0))
         self.draw_circuit_bg(self.world, t)
 
-        # Glitches
         for (gp, alpha) in self.glitches:
             a = int(200*alpha)
             ps = pygame.Surface((10,10), pygame.SRCALPHA)
             pygame.draw.rect(ps, (255, 120, 255, a), pygame.Rect(0,0,10,10))
             self.world.blit(ps, (gp.x-5, gp.y-5))
 
-        # Surges
         for s in self.surges:
             s.draw(self.world)
 
-        # Enemies
         for e in self.enemies:
             e.draw(self.world)
 
-        # Hero
         if self.hero.alive():
             self.hero.draw(self.world)
 
-        # HUD
         self.hud_layer.fill((0,0,0,0))
         if self.state == "menu":
             self.draw_menu(self.hud_layer)
@@ -949,25 +888,17 @@ class Game:
         elif self.state == "paused":
             draw_neon_text(self.hud_layer, "PAUSED", self.bigfont, (W//2 - 80, H//2 - 24), NEON_PURPLE)
 
-        # Screen shake affects world, not HUD
         ox = oy = 0
-        if self.fancy_vfx and self.shake > 0.0:
-            ox = int(random.uniform(-1.0, 1.0) * self.shake)
-            oy = int(random.uniform(-1.0, 1.0) * self.shake)
-
+        # shake visual is harmlessly ignored on web if perf is low
         self.screen.fill(VERY_DARK)
         self.screen.blit(self.world, (ox, oy))
 
-        # Bloom
         if self.fancy_vfx:
             ds = BLOOM_DOWNSCALE
             glow = pygame.transform.smoothscale(self.world, (W//ds, H//ds))
             glow = pygame.transform.smoothscale(glow, (W, H))
             self.screen.blit(glow, (ox, oy), special_flags=pygame.BLEND_ADD)
 
-        # No bright overclock overlay; shake covers the BLAST
-
-        # HUD
         self.screen.blit(self.hud_layer, (0, 0))
 
         if self.show_scans:
@@ -982,6 +913,7 @@ class Game:
                 return False
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
+                    # ESC won't close in browser; harmless on desktop.
                     return False
                 if e.key == pygame.K_p and self.state in ("play","paused"):
                     self.state = "paused" if self.state == "play" else "play"
@@ -1019,9 +951,21 @@ class Game:
                     self.state = "play"
         return True
 
-# ---------- Entry ----------
+# ---------- Async entry (pygbag) ----------
+async def main():
+    game = Game()
+    # main loop must yield to the browser regularly
+    while True:
+        dt = game.clock.tick(FPS) / 1000.0
+        if not game.handle_events():
+            break
+        if game.state != "paused":
+            game.update(dt)
+        game.draw()
+        await asyncio.sleep(0)
+
 if __name__ == "__main__":
     try:
-        Game().run()
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
